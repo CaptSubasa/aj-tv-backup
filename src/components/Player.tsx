@@ -42,6 +42,7 @@ export function Player({
   const wrapRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const hlsRef = useRef<import("hls.js").default | null>(null);
+  const mpegtsRef = useRef<{ destroy: () => void } | null>(null);
   const [levels, setLevels] = useState<LevelOption[]>([]);
   const [level, setLevel] = useState(-1);
   const [active, setActive] = useState("");
@@ -85,6 +86,8 @@ export function Player({
       video.pause();
       hlsRef.current?.destroy();
       hlsRef.current = null;
+      mpegtsRef.current?.destroy();
+      mpegtsRef.current = null;
       video.removeAttribute("src");
       video.load();
     };
@@ -114,6 +117,33 @@ export function Player({
       video.play().catch(() => {});
     };
     (async () => {
+      if (format === "ts") {
+        const mpegts = await import("mpegts.js");
+        if (cancelled) return;
+        if (!mpegts.default.isSupported()) {
+          fail(
+            "Browser ini tidak mendukung pemutaran MPEG-TS. Coba stream HLS (.m3u8) yang disediakan secara resmi.",
+          );
+          return;
+        }
+
+        const player = mpegts.default.createPlayer(
+          { type: "mpegts", url, isLive: true },
+          { enableWorker: true, lazyLoad: false },
+        );
+        mpegtsRef.current = player;
+        setMode("native");
+        player.attachMediaElement(video);
+        player.on(mpegts.default.Events.ERROR, () => {
+          fail(
+            "Stream MPEG-TS gagal diputar. Sumber mungkin tidak aktif, tidak kompatibel, atau membatasi akses browser.",
+          );
+        });
+        player.load();
+        player.play().catch(() => {});
+        return;
+      }
+
       if (format !== "hls") {
         useNative();
         return;
@@ -301,7 +331,7 @@ export function Player({
             <div className="truncate font-display font-semibold">{channel.name}</div>
             <div className="truncate text-xs text-muted-foreground">
               {channel.group}
-              {channel.country ? ` · ${channel.country}` : ""}
+              {channel.country ? ` Â· ${channel.country}` : ""}
             </div>
           </div>
           <Button
@@ -311,12 +341,12 @@ export function Player({
             aria-label={isFav ? "Hapus dari favorit" : "Tambah ke favorit"}
             aria-pressed={isFav}
           >
-            {isFav ? "★" : "☆"}
+            {isFav ? "â˜…" : "â˜†"}
           </Button>
         </div>
         <div className="flex flex-wrap items-center gap-1">
           <Button variant="ghost" className="ctl" onClick={onPrev} aria-label="Sebelumnya">
-            ⏮
+            â®
           </Button>
           <Button
             variant="ghost"
@@ -324,13 +354,13 @@ export function Player({
             onClick={togglePlay}
             aria-label={paused ? "Putar" : "Jeda"}
           >
-            {paused ? "▶" : "❚❚"}
+            {paused ? "â–¶" : "âšâš"}
           </Button>
           <Button variant="ghost" className="ctl" onClick={onStop} aria-label="Stop">
-            ■
+            â– 
           </Button>
           <Button variant="ghost" className="ctl" onClick={onNext} aria-label="Berikutnya">
-            ⏭
+            â­
           </Button>
           <Button
             variant="ghost"
@@ -338,7 +368,7 @@ export function Player({
             onClick={() => setAttempt((a) => a + 1)}
             aria-label="Muat ulang stream"
           >
-            ↻
+            â†»
           </Button>
           <Button
             variant="ghost"
@@ -346,7 +376,7 @@ export function Player({
             onClick={toggleMute}
             aria-label={muted ? "Bunyikan" : "Bisukan"}
           >
-            {muted || volume === 0 ? "🔇" : "🔊"}
+            {muted || volume === 0 ? "ðŸ”‡" : "ðŸ”Š"}
           </Button>
           <input
             type="range"
@@ -368,11 +398,11 @@ export function Player({
           </Button>
           {pipOk && (
             <Button variant="ghost" className="ctl" onClick={pip} aria-label="Picture-in-Picture">
-              ⧉
+              â§‰
             </Button>
           )}
           <Button variant="ghost" className="ctl" onClick={fullscreen} aria-label="Layar penuh">
-            ⛶
+            â›¶
           </Button>
         </div>
         <div className="flex flex-wrap gap-2">
