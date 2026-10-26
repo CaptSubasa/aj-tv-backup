@@ -43,6 +43,7 @@ export function Player({
   const videoRef = useRef<HTMLVideoElement>(null);
   const hlsRef = useRef<import("hls.js").default | null>(null);
   const mpegtsRef = useRef<{ destroy: () => void } | null>(null);
+  const shakaRef = useRef<{ destroy: () => Promise<void> } | null>(null);
   const [levels, setLevels] = useState<LevelOption[]>([]);
   const [level, setLevel] = useState(-1);
   const [active, setActive] = useState("");
@@ -52,7 +53,7 @@ export function Player({
   const [subId, setSubId] = useState(-1);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
-  const [mode, setMode] = useState<"pending" | "hls" | "native">("pending");
+  const [mode, setMode] = useState<"pending" | "hls" | "dash" | "native">("pending");
   const [muted, setMuted] = useState(false);
   const [volume, setVolume] = useState(1);
   const [paused, setPaused] = useState(true);
@@ -88,6 +89,10 @@ export function Player({
       hlsRef.current = null;
       mpegtsRef.current?.destroy();
       mpegtsRef.current = null;
+      if (shakaRef.current) {
+        void shakaRef.current.destroy().catch(() => {});
+        shakaRef.current = null;
+      }
       video.removeAttribute("src");
       video.load();
     };
@@ -140,7 +145,28 @@ export function Player({
           );
         });
         player.load();
-        player.play().catch(() => {});
+        void Promise.resolve(player.play()).catch(() => {});
+        return;
+      }
+
+      if (format === "dash") {
+        const shakaModule = await import("shaka-player");
+        if (cancelled) return;
+        const shaka = shakaModule.default;
+        if (!shaka.Player.isBrowserSupported()) {
+          fail("Browser ini tidak mendukung pemutaran MPEG-DASH. Coba stream HLS (.m3u8) yang disediakan secara resmi.");
+          return;
+        }
+
+        const player = new shaka.Player(video);
+        shakaRef.current = player;
+        setMode("dash");
+        player.addEventListener("error", () => {
+          fail("Stream MPEG-DASH gagal diputar. Sumber mungkin tidak aktif, codec tidak kompatibel, atau akses dibatasi penyedia.");
+        });
+        await player.load(url);
+        if (cancelled) return;
+        void video.play().catch(() => {});
         return;
       }
 
@@ -199,6 +225,7 @@ export function Player({
     })().catch(() => {
       if (cancelled) return;
       if (format === "hls" && video.canPlayType("application/vnd.apple.mpegurl")) useNative();
+      else if (format === "dash") fail("Pemutar MPEG-DASH gagal dimuat. Periksa koneksi dan kompatibilitas stream.");
       else fail("Pemutar HLS gagal dimuat. Periksa koneksi dan coba Ulangi.");
     });
     return () => {
@@ -331,7 +358,7 @@ export function Player({
             <div className="truncate font-display font-semibold">{channel.name}</div>
             <div className="truncate text-xs text-muted-foreground">
               {channel.group}
-              {channel.country ? ` Â· ${channel.country}` : ""}
+              {channel.country ? ` · ${channel.country}` : ""}
             </div>
           </div>
           <Button
@@ -341,42 +368,42 @@ export function Player({
             aria-label={isFav ? "Hapus dari favorit" : "Tambah ke favorit"}
             aria-pressed={isFav}
           >
-            {isFav ? "â˜…" : "â˜†"}
+            {isFav ? "★" : "☆"}
           </Button>
         </div>
-        <div className="flex flex-wrap items-center gap-1">
-          <Button variant="ghost" className="ctl" onClick={onPrev} aria-label="Sebelumnya">
-            â®
+        <div className="flex flex-wrap items-center gap-2">
+          <Button variant="ghost" className="ctl w-auto min-w-12 px-2 text-xs whitespace-nowrap" onClick={onPrev} aria-label="Sebelumnya">
+            PREV
           </Button>
           <Button
             variant="ghost"
-            className="ctl"
+            className="ctl w-auto min-w-12 px-2 text-xs whitespace-nowrap"
             onClick={togglePlay}
             aria-label={paused ? "Putar" : "Jeda"}
           >
-            {paused ? "â–¶" : "âšâš"}
+            {paused ? "PLAY" : "PAUSE"}
           </Button>
-          <Button variant="ghost" className="ctl" onClick={onStop} aria-label="Stop">
-            â– 
+          <Button variant="ghost" className="ctl w-auto min-w-12 px-2 text-xs whitespace-nowrap" onClick={onStop} aria-label="Stop">
+            STOP
           </Button>
-          <Button variant="ghost" className="ctl" onClick={onNext} aria-label="Berikutnya">
-            â­
+          <Button variant="ghost" className="ctl w-auto min-w-12 px-2 text-xs whitespace-nowrap" onClick={onNext} aria-label="Berikutnya">
+            NEXT
           </Button>
           <Button
             variant="ghost"
-            className="ctl"
+            className="ctl w-auto min-w-12 px-2 text-xs whitespace-nowrap"
             onClick={() => setAttempt((a) => a + 1)}
             aria-label="Muat ulang stream"
           >
-            â†»
+            RELOAD
           </Button>
           <Button
             variant="ghost"
-            className="ctl"
+            className="ctl w-auto min-w-12 px-2 text-xs whitespace-nowrap"
             onClick={toggleMute}
             aria-label={muted ? "Bunyikan" : "Bisukan"}
           >
-            {muted || volume === 0 ? "ðŸ”‡" : "ðŸ”Š"}
+            {muted || volume === 0 ? "MUTE" : "SOUND"}
           </Button>
           <input
             type="range"
@@ -390,19 +417,19 @@ export function Player({
           />
           <Button
             variant="ghost"
-            className="ctl w-auto px-2 text-xs"
+            className="ctl w-auto min-w-12 px-2 text-xs whitespace-nowrap"
             onClick={() => onFitChange(fit === "contain" ? "cover" : "contain")}
             aria-label="Ubah tampilan video"
           >
             {fit === "contain" ? "Fit" : "Fill"}
           </Button>
           {pipOk && (
-            <Button variant="ghost" className="ctl" onClick={pip} aria-label="Picture-in-Picture">
-              â§‰
+            <Button variant="ghost" className="ctl w-auto min-w-12 px-2 text-xs whitespace-nowrap" onClick={pip} aria-label="Picture-in-Picture">
+              PiP
             </Button>
           )}
-          <Button variant="ghost" className="ctl" onClick={fullscreen} aria-label="Layar penuh">
-            â›¶
+          <Button variant="ghost" className="ctl w-auto min-w-12 px-2 text-xs whitespace-nowrap" onClick={fullscreen} aria-label="Layar penuh">
+            FULL
           </Button>
         </div>
         <div className="flex flex-wrap gap-2">
