@@ -4,7 +4,7 @@ import { checkTargetUrl, resolveAndCheckHost } from "@/lib/net-guard";
 const MAX_REDIRECTS = 5;
 const MAX_MANIFEST_BYTES = 5 * 1024 * 1024;
 
-function errorResponse(status: number, message: string) {
+function errorResponse(status: number, message: string): Response {
   return new Response(message, {
     status,
     headers: {
@@ -26,9 +26,13 @@ function rewriteHlsManifest(text: string, baseUrl: string): string {
     .map((line) => {
       const trimmed = line.trim();
       if (!trimmed) return line;
+
       if (trimmed.startsWith("#")) {
         return line.replace(/URI=(["'])(.*?)\1/g, (_match, quote: string, uri: string) => {
-          if (!uri || uri.startsWith("data:")) return `URI=${quote}${uri}${quote}`;
+          if (!uri || uri.startsWith("data:")) {
+            return `URI=${quote}${uri}${quote}`;
+          }
+
           try {
             return `URI=${quote}${proxyUrl(new URL(uri, baseUrl).toString())}${quote}`;
           } catch {
@@ -36,6 +40,7 @@ function rewriteHlsManifest(text: string, baseUrl: string): string {
           }
         });
       }
+
       try {
         return proxyUrl(new URL(trimmed, baseUrl).toString());
       } catch {
@@ -57,7 +62,8 @@ export const Route = createFileRoute("/api/stream")({
             "Access-Control-Allow-Origin": "*",
             "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",
             "Access-Control-Allow-Headers": "Range, Accept, Origin",
-            "Access-Control-Expose-Headers": "Accept-Ranges, Content-Length, Content-Range, Content-Type",
+            "Access-Control-Expose-Headers":
+              "Accept-Ranges, Content-Length, Content-Range, Content-Type",
           },
         }),
     },
@@ -67,22 +73,37 @@ export const Route = createFileRoute("/api/stream")({
 async function handleStream(request: Request, headOnly: boolean): Promise<Response> {
   const params = new URL(request.url).searchParams;
   const target = params.get("url")?.trim() ?? "";
-  if (!target || target.length > 4096) return errorResponse(400, "URL stream tidak valid.");
+
+  if (!target || target.length > 4096) {
+    return errorResponse(400, "URL stream tidak valid.");
+  }
 
   let current = target;
   let upstream: Response | null = null;
 
   for (let i = 0; i <= MAX_REDIRECTS; i++) {
     const bad = checkTargetUrl(current);
-    if (bad) return errorResponse(400, i ? `Redirect diblokir: ${bad}` : bad);
+    if (bad) {
+      return errorResponse(400, i ? `Redirect diblokir: ${bad}` : bad);
+    }
 
-    const dnsBad = await resolveAndCheckHost(new URL(current).hostname);
-    if (dnsBad) return errorResponse(400, dnsBad);
+    let hostname: string;
+    try {
+      hostname = new URL(current).hostname;
+    } catch {
+      return errorResponse(400, "URL stream tidak valid.");
+    }
+
+    const dnsBad = await resolveAndCheckHost(hostname);
+    if (dnsBad) {
+      return errorResponse(400, dnsBad);
+    }
 
     const headers = new Headers();
     const range = request.headers.get("Range");
-    if (range) headers.set("Range", range);
     const accept = request.headers.get("Accept");
+
+    if (range) headers.set("Range", range);
     if (accept) headers.set("Accept", accept);
     headers.set("User-Agent", "AJTV/1.0 (stream player)");
 
@@ -100,14 +121,27 @@ async function handleStream(request: Request, headOnly: boolean): Promise<Respon
     const location = upstream.headers.get("Location");
     if (upstream.status >= 300 && upstream.status < 400 && location) {
       await upstream.body?.cancel().catch(() => {});
-      if (i === MAX_REDIRECTS) return errorResponse(502, "Terlalu banyak redirect dari sumber streaming.");
-      current = new URL(location, current).toString();
+
+      if (i === MAX_REDIRECTS) {
+        return errorResponse(502, "Terlalu banyak redirect dari sumber streaming.");
+      }
+
+      try {
+        current = new URL(location, current).toString();
+      } catch {
+        return errorResponse(502, "URL redirect dari sumber streaming tidak valid.");
+      }
+
       continue;
     }
+
     break;
   }
 
-  if (!upstream) return errorResponse(502, "Sumber streaming tidak memberikan respons.");
+  if (!upstream) {
+    return errorResponse(502, "Sumber streaming tidak memberikan respons.");
+  }
+
   if (upstream.status === 401 || upstream.status === 403) {
     await upstream.body?.cancel().catch(() => {});
     return errorResponse(upstream.status, "Penyedia menolak akses ke stream.");
@@ -121,53 +155,82 @@ async function handleStream(request: Request, headOnly: boolean): Promise<Respon
   const cacheControl = upstream.headers.get("Cache-Control");
 
   responseHeaders.set("Access-Control-Allow-Origin", "*");
-  responseHeaders.set("Access-Control-Expose-Headers", "Accept-Ranges, Content-Length, Content-Range, Content-Type");
+  responseHeaders.set(
+    "Access-Control-Expose-Headers",
+    "Accept-Ranges, Content-Length, Content-Range, Content-Type",
+  );
   responseHeaders.set("X-Content-Type-Options", "nosniff");
   responseHeaders.set("Cache-Control", cacheControl || "no-store");
+
   if (contentType) responseHeaders.set("Content-Type", contentType);
   if (contentLength) responseHeaders.set("Content-Length", contentLength);
   if (contentRange) responseHeaders.set("Content-Range", contentRange);
   if (acceptRanges) responseHeaders.set("Accept-Ranges", acceptRanges);
 
-  const isHls = /\.m3u8(?:$|\?)/i.test(new URL(current).pathname) ||
-    /application\/(?:vnd\.apple\.mpegurl|x-mpegurl)|audio\/mpegurl/i.test(contentType);
+  let isHls = false;
+  try {
+    const pathname = new URL(current).pathname;
+    isHls =
+      /\.m3u8$/i.test(pathname) ||
+      /application\/(?:vnd\.apple\.mpegurl|x-mpegurl)|audio\/mpegurl/i.test(contentType);
+  } catch {
+    await upstream.body?.cancel().catch(() => {});
+    return errorResponse(502, "URL sumber streaming tidak valid.");
+  }
 
   if (headOnly) {
     await upstream.body?.cancel().catch(() => {});
-    return new Response(null, { status: upstream.status, headers: responseHeaders });
+    return new Response(null, {
+      status: upstream.status,
+      headers: responseHeaders,
+    });
   }
 
   if (isHls && upstream.ok && upstream.body) {
     const reader = upstream.body.getReader();
     const chunks: Uint8Array[] = [];
     let total = 0;
+
     try {
       for (;;) {
         const { done, value } = await reader.read();
         if (done) break;
+
         total += value.byteLength;
         if (total > MAX_MANIFEST_BYTES) {
           await reader.cancel().catch(() => {});
           return errorResponse(413, "Playlist HLS terlalu besar untuk diproses.");
         }
+
         chunks.push(value);
       }
     } catch {
+      await reader.cancel().catch(() => {});
       return errorResponse(502, "Gagal membaca playlist HLS dari penyedia.");
     }
+
     const bytes = new Uint8Array(total);
     let offset = 0;
     for (const chunk of chunks) {
       bytes.set(chunk, offset);
       offset += chunk.byteLength;
     }
+
     const manifest = new TextDecoder().decode(bytes);
     const rewritten = rewriteHlsManifest(manifest, current);
+
     responseHeaders.set("Content-Type", "application/vnd.apple.mpegurl; charset=utf-8");
     responseHeaders.delete("Content-Length");
     responseHeaders.set("Cache-Control", "no-store");
-    return new Response(rewritten, { status: upstream.status, headers: responseHeaders });
+
+    return new Response(rewritten, {
+      status: upstream.status,
+      headers: responseHeaders,
+    });
   }
 
-  return new Response(upstream.body, { status: upstream.status, headers: responseHeaders });
+  return new Response(upstream.body, {
+    status: upstream.status,
+    headers: responseHeaders,
+  });
 }
