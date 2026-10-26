@@ -99,12 +99,19 @@ export function Player({
     stopMedia();
     setPaused(true);
     const blocked = checkPlaybackUrl(url, window.location.protocol);
-    if (blocked) {
+    const format = detectStreamFormat(url);
+    const needsProxy = blocked?.kind === "mixed-content";
+    if (blocked && !needsProxy) {
       setError(blocked.message);
       setLoading(false);
       return;
     }
-    const format = detectStreamFormat(url);
+    if (needsProxy && format === "dash") {
+      setError("Stream DASH melalui HTTP belum didukung karena manifest dan segmennya perlu penulisan ulang khusus. Gunakan URL HTTPS resmi dari penyedia.");
+      setLoading(false);
+      return;
+    }
+    const playbackUrl = needsProxy ? `/api/stream?url=${encodeURIComponent(url)}` : url;
     const fail = (message: string) => {
       if (cancelled) return;
       setLoading(false);
@@ -118,7 +125,7 @@ export function Player({
         return;
       }
       setMode("native");
-      video.src = url;
+      video.src = playbackUrl;
       video.play().catch(() => {});
     };
     (async () => {
@@ -133,7 +140,7 @@ export function Player({
         }
 
         const player = mpegts.default.createPlayer(
-          { type: "mpegts", url, isLive: true },
+          { type: "mpegts", url: playbackUrl, isLive: true },
           { enableWorker: true, lazyLoad: false },
         );
         mpegtsRef.current = player;
@@ -164,7 +171,7 @@ export function Player({
         player.addEventListener("error", () => {
           fail("Stream MPEG-DASH gagal diputar. Sumber mungkin tidak aktif, codec tidak kompatibel, atau akses dibatasi penyedia.");
         });
-        await player.load(url);
+        await player.load(playbackUrl);
         if (cancelled) return;
         void video.play().catch(() => {});
         return;
@@ -212,7 +219,7 @@ export function Player({
           if (!d.fatal || cancelled) return;
           fail(hlsPlaybackIssue(d.type, d.details, d.response?.code).message);
         });
-        hls.loadSource(url);
+        hls.loadSource(playbackUrl);
         hls.attachMedia(video);
       } else if (
         video.canPlayType("application/vnd.apple.mpegurl") ||
